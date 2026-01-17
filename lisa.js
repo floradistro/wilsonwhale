@@ -2396,6 +2396,9 @@ async function interactive(hasPrevious) {
     // Update previous row count
     prevInputRows = inputRows;
 
+    // Save cursor position after writing input
+    process.stdout.write('\x1b7');
+
     // Draw command menu if visible
     if (menuVisible && menuItems.length > 0) {
       process.stdout.write('\n');
@@ -2406,10 +2409,6 @@ async function interactive(hasPrevious) {
         const descStyle = selected ? `${GRAY}` : `${GRAY_DIM}`;
         process.stdout.write(`${prefix}${cmdStyle}${item.cmd}${RESET}  ${descStyle}${item.desc}${RESET}\n`);
       });
-      // Position cursor back to end of input
-      const moveUp = menuItems.length + (inputRows - 1 - cursorRow);
-      if (moveUp > 0) process.stdout.write(`\x1b[${moveUp}A`);
-      process.stdout.write(`\r\x1b[${cursorCol}G`);
     } else if (submenu.visible && submenu.items.length > 0) {
       // Draw submenu
       process.stdout.write('\n');
@@ -2425,19 +2424,13 @@ async function interactive(hasPrevious) {
       if (submenu.hint) {
         process.stdout.write(`  ${GRAY_DIM}${submenu.hint}${RESET}\n`);
       }
-      // Position cursor back to end of input
-      const submenuLines = submenu.items.length + 2 + (submenu.hint ? 1 : 0);
-      const moveUp = submenuLines + (inputRows - 1 - cursorRow);
-      if (moveUp > 0) process.stdout.write(`\x1b[${moveUp}A`);
-      process.stdout.write(`\r\x1b[${cursorCol}G`);
     } else {
       // No menu - just draw bottom divider
-      process.stdout.write('\n\x1b[K' + drawDivider());
-      // Move back up to cursor position
-      const moveUp = 1 + (inputRows - 1 - cursorRow);
-      if (moveUp > 0) process.stdout.write(`\x1b[${moveUp}A`);
-      process.stdout.write(`\r\x1b[${cursorCol}G`);
+      process.stdout.write('\n' + drawDivider());
     }
+
+    // Restore cursor position
+    process.stdout.write('\x1b8');
   };
 
   // Update menu based on input
