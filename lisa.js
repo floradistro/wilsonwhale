@@ -2369,9 +2369,8 @@ async function interactive(hasPrevious) {
   const showPrompt = () => {
     process.stdout.write(drawDivider() + '\n');  // Top divider
     process.stdout.write(getPrompt());            // Prompt line (cursor here)
-    process.stdout.write('\x1b7');                // Save cursor position HERE
     process.stdout.write('\n' + drawDivider());   // Bottom divider
-    process.stdout.write('\x1b8');                // Restore to end of prompt
+    process.stdout.write('\x1b[A\x1b[999C');      // Move up 1 line, go to end
     inputBoxDrawn = true;
     prevInputRows = 1;
   };
@@ -2395,14 +2394,12 @@ async function interactive(hasPrevious) {
     const width = getWidth();
     const inputRows = getInputRows();
 
-    // After cursor restore, we're at end of input line.
     // Move up to first row of input if it was multi-line
     if (prevInputRows > 1) {
       process.stdout.write(`\x1b[${prevInputRows - 1}A`);
     }
 
     // Move to start of line and clear everything from here down
-    // This clears the old input AND any menu/divider below
     process.stdout.write('\r\x1b[J');
 
     // Redraw prompt + input (will wrap naturally)
@@ -2411,23 +2408,26 @@ async function interactive(hasPrevious) {
     // Update previous row count
     prevInputRows = inputRows;
 
-    // Save cursor position after writing input
-    process.stdout.write('\x1b7');
+    // Track how many lines we'll draw below so we can move back up
+    let linesBelow = 0;
 
     // Draw command menu if visible
     if (menuVisible && menuItems.length > 0) {
       process.stdout.write('\n');
+      linesBelow = 1;
       menuItems.forEach((item, i) => {
         const selected = i === menuIndex;
         const prefix = selected ? `${BLUE}▸${RESET} ` : '  ';
         const cmdStyle = selected ? `${WHITE}${BOLD}` : `${GRAY}`;
         const descStyle = selected ? `${GRAY}` : `${GRAY_DIM}`;
         process.stdout.write(`${prefix}${cmdStyle}${item.cmd}${RESET}  ${descStyle}${item.desc}${RESET}\n`);
+        linesBelow++;
       });
     } else if (submenu.visible && submenu.items.length > 0) {
       // Draw submenu
       process.stdout.write('\n');
       process.stdout.write(`  ${WHITE}${BOLD}${submenu.title}${RESET}\n`);
+      linesBelow = 2;
       submenu.items.forEach((item, i) => {
         const selected = i === submenu.index;
         const prefix = selected ? `${BLUE}▸${RESET} ` : '  ';
@@ -2435,17 +2435,25 @@ async function interactive(hasPrevious) {
         const hintStyle = `${GRAY_DIM}`;
         const hint = item.hint ? `  ${hintStyle}${item.hint}${RESET}` : '';
         process.stdout.write(`${prefix}${labelStyle}${item.label}${RESET}${hint}\n`);
+        linesBelow++;
       });
       if (submenu.hint) {
         process.stdout.write(`  ${GRAY_DIM}${submenu.hint}${RESET}\n`);
+        linesBelow++;
       }
     } else {
       // No menu - just draw bottom divider
       process.stdout.write('\n' + drawDivider());
+      linesBelow = 1;
     }
 
-    // Restore cursor position
-    process.stdout.write('\x1b8');
+    // Move cursor back up to input line, accounting for wrapped input
+    const totalUp = linesBelow + (inputRows - 1);
+    if (totalUp > 0) {
+      process.stdout.write(`\x1b[${totalUp}A`);
+    }
+    // Move to end of line (after input)
+    process.stdout.write('\x1b[999C');
   };
 
   // Update menu based on input
