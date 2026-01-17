@@ -6,9 +6,10 @@
  */
 
 import { createInterface, emitKeypressEvents } from "readline";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, createReadStream } from "fs";
+import { readFile, stat, readdir } from "fs/promises";
 import { homedir } from "os";
-import { join, dirname } from "path";
+import { join, dirname, basename, extname } from "path";
 import { execSync, spawnSync } from "child_process";
 
 // =============================================================================
@@ -43,6 +44,175 @@ const GREEN_BRIGHT = "\x1b[38;5;46m";   // Bright green - emphasis
 const RED = "\x1b[38;5;203m";           // Soft red - errors, negative
 const ORANGE = "\x1b[38;5;215m";        // Soft orange - warnings
 const GREEN_DIM = "\x1b[38;5;34m";      // For compatibility
+const MAGENTA = "\x1b[38;5;165m";      // Magenta for bars
+const CYAN = "\x1b[38;5;51m";          // Cyan accent
+
+// =============================================================================
+// Chart Rendering (stdout-based)
+// =============================================================================
+
+const SPARK = '▁▂▃▄▅▆▇█';
+
+function fmt(n, isCurrency = false) {
+  const prefix = isCurrency ? '$' : '';
+  if (n >= 1e6) return prefix + (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return prefix + (n / 1e3).toFixed(1) + 'K';
+  return prefix + Math.round(n).toLocaleString();
+}
+
+function sparkline(vals) {
+  if (!vals?.length) return '';
+  const min = Math.min(...vals), max = Math.max(...vals), r = max - min || 1;
+  return vals.map(v => SPARK[Math.min(7, Math.floor(((v - min) / r) * 7))]).join('');
+}
+
+function renderBarChart(title, data, options = {}) {
+  const isCurrency = options.isCurrency || /revenue|sales|amount|total/i.test(title);
+  const max = Math.max(...data.map(d => d.value));
+  const total = data.reduce((sum, d) => sum + d.value, 0);
+  const labelW = Math.min(Math.max(...data.map(d => d.label.length), 8), 18);
+  const lines = [];
+
+  lines.push('');
+  lines.push(`${WHITE}${BOLD}${title}${RESET}`);
+  lines.push(`${GRAY_DARK}${'─'.repeat(55)}${RESET}`);
+
+  data.slice(0, 8).forEach(({ label, value }) => {
+    const w = Math.round((value / max) * 24);
+    const displayLabel = label.length > labelW ? label.slice(0, labelW - 1) + '…' : label;
+    const pct = total > 0 ? Math.round((value / total) * 100) : 0;
+    lines.push(`${WHITE}${displayLabel.padEnd(labelW)}${RESET}  ${MAGENTA}${'█'.repeat(w)}${RESET} ${GREEN}${fmt(value, isCurrency)}${RESET} ${GRAY_DIM}(${pct}%)${RESET}`);
+  });
+
+  lines.push(`${GRAY_DARK}${'─'.repeat(55)}${RESET}`);
+  lines.push(`${BOLD}${'Total'.padEnd(labelW)}${RESET}  ${' '.repeat(24)} ${BOLD}${GREEN}${fmt(total, isCurrency)}${RESET}`);
+
+  return lines.join('\n');
+}
+
+function renderLineChart(title, data) {
+  const vals = data.map(d => d.value);
+  const spark = sparkline(vals);
+  const first = vals[0], last = vals[vals.length - 1];
+  const pct = first ? ((last - first) / first * 100).toFixed(1) : '0';
+  const trend = last >= first ? `${GREEN}▲${RESET}` : `${RED}▼${RESET}`;
+  const lines = [];
+
+  lines.push('');
+  lines.push(`${WHITE}${BOLD}${title}${RESET}`);
+  lines.push(`${CYAN}${spark}${RESET}  ${trend} ${GRAY_DIM}${pct}%${RESET}`);
+  lines.push(`${GRAY_DIM}${fmt(first)} → ${fmt(last)}${RESET}`);
+
+  return lines.join('\n');
+}
+
+function renderDonutChart(title, data, options = {}) {
+  const colors = [MAGENTA, CYAN, GREEN, ORANGE, BLUE];
+  const isCurrency = options.isCurrency || /revenue|sales|amount/i.test(title);
+  const total = data.reduce((a, d) => a + d.value, 0);
+  const labelW = Math.min(Math.max(...data.map(d => d.label.length), 12), 16);
+  const lines = [];
+
+  lines.push('');
+  lines.push(`${WHITE}${BOLD}${title}${RESET}`);
+  lines.push(`${GRAY_DARK}${'─'.repeat(50)}${RESET}`);
+
+  data.slice(0, 5).forEach((d, i) => {
+    const pct = Math.round((d.value / total) * 100);
+    const bar = '█'.repeat(Math.round(pct / 4));
+    const displayLabel = d.label.length > labelW ? d.label.slice(0, labelW - 1) + '…' : d.label;
+    lines.push(`${WHITE}${displayLabel.padEnd(labelW)}${RESET} ${colors[i]}${bar.padEnd(25)}${RESET} ${GREEN}${fmt(d.value, isCurrency)}${RESET} ${GRAY_DIM}(${pct}%)${RESET}`);
+  });
+
+  lines.push(`${GRAY_DARK}${'─'.repeat(50)}${RESET}`);
+  lines.push(`${BOLD}${'Total'.padEnd(labelW)}${RESET} ${' '.repeat(25)} ${BOLD}${GREEN}${fmt(total, isCurrency)}${RESET}`);
+
+  return lines.join('\n');
+}
+
+function renderTable(title, headers, rows) {
+  const ws = headers.map((h, i) => Math.max(h.length, ...rows.map(r => String(r[i] || '').length), 4));
+  const lines = [];
+
+  lines.push('');
+  lines.push(`${WHITE}${BOLD}${title}${RESET}`);
+  lines.push(`${GRAY_DARK}${'─'.repeat(ws.reduce((a, b) => a + b + 3, 0))}${RESET}`);
+  lines.push('  ' + headers.map((h, i) => `${BOLD}${h.padEnd(ws[i])}${RESET}`).join('   '));
+
+  rows.slice(0, 6).forEach(row => {
+    lines.push('  ' + row.map((c, i) => {
+      const s = String(c || '');
+      const color = s.startsWith('$') ? GREEN : s.startsWith('-') ? RED : GRAY;
+      return `${color}${s.padEnd(ws[i])}${RESET}`;
+    }).join('   '));
+  });
+
+  if (rows.length > 6) lines.push(`${GRAY_DIM}  +${rows.length - 6} more${RESET}`);
+
+  return lines.join('\n');
+}
+
+function renderMetrics(title, metrics) {
+  const lines = [];
+  lines.push('');
+  lines.push(`${WHITE}${BOLD}${title}${RESET}`);
+  lines.push(`${GRAY_DARK}${'─'.repeat(40)}${RESET}`);
+
+  metrics.forEach(m => {
+    let line = `${GRAY}${m.label.padEnd(16)}${RESET} ${BOLD}${GREEN}${m.value}${RESET}`;
+    if (m.change != null) {
+      const arrow = m.change >= 0 ? '▲' : '▼';
+      const color = m.change >= 0 ? GREEN : RED;
+      line += `  ${color}${arrow} ${Math.abs(m.change).toFixed(1)}%${RESET}`;
+    }
+    lines.push(line);
+  });
+
+  return lines.join('\n');
+}
+
+function tryRenderChart(data, name) {
+  if (!data) return null;
+
+  // Handle explicit chart structure
+  if (data.chart) {
+    const c = data.chart;
+    if (c.type === 'bar' && c.data) return renderBarChart(c.title || name, c.data);
+    if (c.type === 'line' && c.data) return renderLineChart(c.title || name, c.data);
+    if ((c.type === 'donut' || c.type === 'pie') && c.data) return renderDonutChart(c.title || name, c.data);
+    if (c.type === 'table' && c.headers && c.rows) return renderTable(c.title || name, c.headers, c.rows);
+    if (c.type === 'metrics' && c.data) return renderMetrics(c.title || name, c.data);
+    return null;
+  }
+
+  // Auto-detect from data structure
+  const rows = data.data || data.results || data.rows || (Array.isArray(data) ? data : null);
+  if (!rows?.length || typeof rows[0] !== 'object') return null;
+
+  const keys = Object.keys(rows[0]);
+  const labelKey = keys.find(k => /name|label|category|product|date|day|month/i.test(k));
+  const valueKey = keys.find(k => /^total_revenue$|^revenue$|^total_sales$|^sales$/i.test(k))
+    || keys.find(k => /revenue|sales|amount/i.test(k))
+    || keys.find(k => /^total$|^value$|^sum$/i.test(k))
+    || keys.find(k => /count|qty|units|quantity/i.test(k));
+
+  if (labelKey && valueKey) {
+    const isCurrency = /revenue|sales|amount|total(?!_count)/i.test(valueKey);
+    const chartData = rows.slice(0, 10).map(r => ({
+      label: String(r[labelKey] || '').slice(0, 20),
+      value: Number(String(r[valueKey]).replace(/[^0-9.-]/g, '')) || 0
+    }));
+
+    const prettyTitle = (name || 'Data').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+    if (/date|day|week|month/i.test(labelKey)) {
+      return renderLineChart(prettyTitle, chartData);
+    }
+    return renderBarChart(prettyTitle, chartData, { isCurrency });
+  }
+
+  return null;
+}
 
 // =============================================================================
 // Session & Auth
@@ -429,6 +599,265 @@ async function loadMenuConfig(storeId) {
 // From lisa-blessed.js - tool schemas sent to backend
 // =============================================================================
 
+// Constants for advanced tools
+const MAX_FILE_SIZE_FULL_READ = 5 * 1024 * 1024; // 5MB - files larger get sampled
+const MAX_JSON_PREVIEW_RECORDS = 100;
+const PARALLEL_FILE_BATCH = 10;
+
+// Format bytes to human readable
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+}
+
+// Parallel file stat collection
+async function parallelStatFiles(paths) {
+  const results = await Promise.all(
+    paths.map(async (p) => {
+      try {
+        const s = await stat(p);
+        return { path: p, size: s.size, isDir: s.isDirectory(), mtime: s.mtime, error: null };
+      } catch (err) {
+        return { path: p, error: err.message };
+      }
+    })
+  );
+  return results;
+}
+
+// Stream-read large JSON file and extract summary
+async function streamJsonSummary(filePath, maxRecords = MAX_JSON_PREVIEW_RECORDS) {
+  return new Promise((resolve) => {
+    const results = { records: [], totalSize: 0, fields: new Set(), recordCount: 0, error: null };
+
+    try {
+      const stats = statSync(filePath);
+      results.totalSize = stats.size;
+
+      // For small files, just read directly
+      if (stats.size < MAX_FILE_SIZE_FULL_READ) {
+        const content = readFileSync(filePath, 'utf8');
+        const data = JSON.parse(content);
+        if (Array.isArray(data)) {
+          results.recordCount = data.length;
+          results.records = data.slice(0, maxRecords);
+          if (data.length > 0) {
+            Object.keys(data[0]).forEach(k => results.fields.add(k));
+          }
+        } else {
+          results.records = [data];
+          results.recordCount = 1;
+          Object.keys(data).forEach(k => results.fields.add(k));
+        }
+        results.fields = Array.from(results.fields);
+        resolve(results);
+        return;
+      }
+
+      // For large files, stream and sample
+      let buffer = '';
+      let inArray = false;
+      let depth = 0;
+      let recordStart = -1;
+      let recordsFound = 0;
+
+      const stream = createReadStream(filePath, { encoding: 'utf8', highWaterMark: 64 * 1024 });
+
+      stream.on('data', (chunk) => {
+        if (recordsFound >= maxRecords) {
+          stream.destroy();
+          return;
+        }
+
+        buffer += chunk;
+
+        // Quick parse for array of objects
+        for (let i = 0; i < buffer.length && recordsFound < maxRecords; i++) {
+          const char = buffer[i];
+          if (char === '[' && !inArray) { inArray = true; continue; }
+          if (!inArray) continue;
+
+          if (char === '{') {
+            if (depth === 0) recordStart = i;
+            depth++;
+          } else if (char === '}') {
+            depth--;
+            if (depth === 0 && recordStart >= 0) {
+              try {
+                const record = JSON.parse(buffer.slice(recordStart, i + 1));
+                results.records.push(record);
+                Object.keys(record).forEach(k => results.fields.add(k));
+                recordsFound++;
+              } catch {}
+              recordStart = -1;
+            }
+          }
+        }
+
+        // Keep only unprocessed part
+        if (recordStart >= 0) {
+          buffer = buffer.slice(recordStart);
+          recordStart = 0;
+        } else {
+          buffer = '';
+        }
+      });
+
+      stream.on('end', () => {
+        // Estimate total records based on file size and avg record size
+        if (results.records.length > 0) {
+          const avgRecordSize = results.totalSize / results.records.length * (results.records.length / maxRecords);
+          results.recordCount = Math.round(results.totalSize / (avgRecordSize / results.records.length));
+        }
+        results.fields = Array.from(results.fields);
+        resolve(results);
+      });
+
+      stream.on('error', (err) => {
+        results.error = err.message;
+        results.fields = Array.from(results.fields);
+        resolve(results);
+      });
+
+    } catch (err) {
+      results.error = err.message;
+      results.fields = Array.from(results.fields);
+      resolve(results);
+    }
+  });
+}
+
+// Parallel directory analysis - processes entire directory tree in parallel
+async function analyzeDirectoryParallel(dirPath, options = {}) {
+  const { maxDepth = 5, includeContent = true } = options;
+  const startTime = Date.now();
+
+  const results = {
+    path: dirPath,
+    totalSize: 0,
+    fileCount: 0,
+    dirCount: 0,
+    files: [],
+    subdirs: [],
+    byExtension: {},
+    bySize: { small: 0, medium: 0, large: 0, huge: 0 },
+    largestFiles: [],
+    jsonSummaries: {},
+    errors: [],
+    processingTimeMs: 0
+  };
+
+  // Recursive directory walker
+  async function walkDir(currentPath, depth) {
+    if (depth > maxDepth) return;
+
+    try {
+      const entries = await readdir(currentPath, { withFileTypes: true });
+      const files = [];
+      const dirs = [];
+
+      for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue; // Skip hidden
+        const fullPath = join(currentPath, entry.name);
+
+        if (entry.isDirectory()) {
+          dirs.push(fullPath);
+          results.dirCount++;
+        } else if (entry.isFile()) {
+          files.push(fullPath);
+        }
+      }
+
+      // Process files in parallel batches
+      for (let i = 0; i < files.length; i += PARALLEL_FILE_BATCH) {
+        const batch = files.slice(i, i + PARALLEL_FILE_BATCH);
+        const stats = await parallelStatFiles(batch);
+
+        for (const s of stats) {
+          if (s.error) {
+            results.errors.push({ path: s.path, error: s.error });
+            continue;
+          }
+
+          results.fileCount++;
+          results.totalSize += s.size;
+
+          const ext = extname(s.path).toLowerCase() || '(no ext)';
+          results.byExtension[ext] = (results.byExtension[ext] || { count: 0, size: 0 });
+          results.byExtension[ext].count++;
+          results.byExtension[ext].size += s.size;
+
+          // Categorize by size
+          if (s.size < 100 * 1024) results.bySize.small++;
+          else if (s.size < 1024 * 1024) results.bySize.medium++;
+          else if (s.size < 50 * 1024 * 1024) results.bySize.large++;
+          else results.bySize.huge++;
+
+          // Track largest files
+          results.largestFiles.push({ path: s.path, size: s.size, name: basename(s.path) });
+
+          const relPath = s.path.replace(dirPath, '').replace(/^\//, '');
+          results.files.push({ name: basename(s.path), path: relPath, size: s.size, ext });
+        }
+      }
+
+      // Store subdirs
+      for (const d of dirs) {
+        const relPath = d.replace(dirPath, '').replace(/^\//, '');
+        results.subdirs.push({ name: basename(d), path: relPath });
+      }
+
+      // Recurse into subdirs in parallel
+      await Promise.all(dirs.map(d => walkDir(d, depth + 1)));
+
+    } catch (err) {
+      results.errors.push({ path: currentPath, error: err.message });
+    }
+  }
+
+  await walkDir(dirPath, 0);
+
+  // Sort and limit largest files
+  results.largestFiles.sort((a, b) => b.size - a.size);
+  results.largestFiles = results.largestFiles.slice(0, 10).map(f => ({
+    ...f,
+    sizeFormatted: formatBytes(f.size)
+  }));
+
+  // Process JSON files in parallel for summaries
+  if (includeContent) {
+    const jsonFiles = results.files
+      .filter(f => f.ext === '.json')
+      .sort((a, b) => b.size - a.size)
+      .slice(0, 10); // Top 10 largest JSON files
+
+    const jsonPromises = jsonFiles.map(async (f) => {
+      const fullPath = join(dirPath, f.path);
+      const summary = await streamJsonSummary(fullPath);
+      return { path: f.path, ...summary };
+    });
+
+    const jsonResults = await Promise.all(jsonPromises);
+    for (const jr of jsonResults) {
+      if (jr.records.length > 0) {
+        results.jsonSummaries[jr.path] = {
+          fields: jr.fields,
+          recordCount: jr.recordCount,
+          sampleRecords: jr.records.slice(0, 3),
+          totalSize: jr.totalSize
+        };
+      }
+    }
+  }
+
+  results.processingTimeMs = Date.now() - startTime;
+  results.totalSizeFormatted = formatBytes(results.totalSize);
+
+  return results;
+}
+
 const LOCAL_TOOLS = [
   { name: "Read", description: "Read file contents", parameters: { type: "object", properties: { file_path: { type: "string" }, offset: { type: "number" }, limit: { type: "number" } }, required: ["file_path"] } },
   { name: "Edit", description: "Edit file by replacing text", parameters: { type: "object", properties: { file_path: { type: "string" }, old_string: { type: "string" }, new_string: { type: "string" }, replace_all: { type: "boolean" } }, required: ["file_path", "old_string", "new_string"] } },
@@ -437,6 +866,10 @@ const LOCAL_TOOLS = [
   { name: "Grep", description: "Search in files", parameters: { type: "object", properties: { pattern: { type: "string" }, path: { type: "string" }, case_insensitive: { type: "boolean" } }, required: ["pattern"] } },
   { name: "Bash", description: "Run shell command", parameters: { type: "object", properties: { command: { type: "string" }, cwd: { type: "string" }, timeout: { type: "number" } }, required: ["command"] } },
   { name: "LS", description: "List directory", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
+  { name: "Scan", description: "Analyze directory structure and contents in parallel", parameters: { type: "object", properties: { path: { type: "string" }, depth: { type: "number" }, content: { type: "boolean" } }, required: ["path"] } },
+  { name: "Peek", description: "Sample large JSON files without loading entirely", parameters: { type: "object", properties: { file_path: { type: "string" }, limit: { type: "number" }, aggregate: { type: "object" } }, required: ["file_path"] } },
+  { name: "Multi", description: "Read multiple files in parallel", parameters: { type: "object", properties: { paths: { type: "array", items: { type: "string" } }, lines: { type: "number" } }, required: ["paths"] } },
+  { name: "Sum", description: "Aggregate data from JSON files (handles COVA exports)", parameters: { type: "object", properties: { path: { type: "string" }, group: { type: "string" }, fields: { type: "array", items: { type: "string" } }, top: { type: "number" }, type: { type: "string" } }, required: ["path"] } },
 ];
 
 // Execute a local tool - returns structured result for backend
@@ -492,6 +925,216 @@ async function executeTool(name, params) {
         const entries = readdirSync(params.path, { withFileTypes: true });
         return { success: true, entries: entries.map(e => ({ name: e.name, type: e.isDirectory() ? 'dir' : 'file' })) };
       }
+
+      case "Scan": {
+        if (!params.path) return { success: false, error: 'Missing path' };
+        const result = await analyzeDirectoryParallel(params.path, {
+          maxDepth: params.depth || 5,
+          includeContent: params.content !== false
+        });
+        return { success: true, ...result };
+      }
+
+      case "Peek": {
+        if (!params.file_path) return { success: false, error: 'Missing file_path' };
+        const summary = await streamJsonSummary(params.file_path, params.limit || 100);
+
+        // If aggregation requested, compute it
+        if (params.aggregate && summary.records.length > 0) {
+          const { groupBy, sumFields = [], countField } = params.aggregate;
+          const groups = {};
+
+          for (const record of summary.records) {
+            const key = record[groupBy] || '(unknown)';
+            if (!groups[key]) {
+              groups[key] = { _count: 0 };
+              sumFields.forEach(f => groups[key][f] = 0);
+            }
+            groups[key]._count++;
+            sumFields.forEach(f => {
+              const val = parseFloat(String(record[f] || 0).replace(/[^0-9.-]/g, ''));
+              if (!isNaN(val)) groups[key][f] += val;
+            });
+          }
+
+          summary.aggregation = Object.entries(groups)
+            .map(([key, vals]) => ({ [groupBy]: key, ...vals }))
+            .sort((a, b) => (b[sumFields[0]] || b._count) - (a[sumFields[0]] || a._count))
+            .slice(0, 20);
+        }
+
+        return { success: true, ...summary, fields: Array.from(summary.fields) };
+      }
+
+      case "Multi": {
+        if (!params.paths || !Array.isArray(params.paths)) return { success: false, error: 'Missing paths array' };
+        const maxLines = params.lines || 500;
+
+        const results = await Promise.all(
+          params.paths.map(async (filePath) => {
+            try {
+              const content = await readFile(filePath, 'utf8');
+              const lines = content.split('\n');
+              const subset = lines.slice(0, maxLines);
+              return {
+                path: filePath,
+                success: true,
+                content: subset.join('\n'),
+                totalLines: lines.length,
+                truncated: lines.length > maxLines
+              };
+            } catch (err) {
+              return { path: filePath, success: false, error: err.message };
+            }
+          })
+        );
+
+        return { success: true, files: results };
+      }
+
+      case "Sum": {
+        if (!params.path) return { success: false, error: 'Missing path' };
+        const groupBy = params.group || 'Product';
+        const sumFields = params.fields || ['Gross Sales', 'Items Sold', 'Net Sold'];
+        const topN = params.top || 20;
+        const reportType = params.type || 'auto';
+
+        // Find all JSON files
+        let jsonFiles = [];
+        try {
+          const pathStat = statSync(params.path);
+          if (pathStat.isDirectory()) {
+            // Recursively find JSON files
+            const findJsonFiles = (dir) => {
+              const entries = readdirSync(dir, { withFileTypes: true });
+              for (const entry of entries) {
+                const fullPath = join(dir, entry.name);
+                if (entry.isDirectory()) {
+                  findJsonFiles(fullPath);
+                } else if (entry.name.endsWith('.json')) {
+                  jsonFiles.push(fullPath);
+                }
+              }
+            };
+            findJsonFiles(params.path);
+          } else {
+            jsonFiles = [params.path];
+          }
+        } catch (err) {
+          return { success: false, error: `Path error: ${err.message}` };
+        }
+
+        // Filter files to avoid double-counting for COVA exports
+        if (reportType === 'auto' && jsonFiles.length > 1) {
+          const byLocation = {};
+          for (const f of jsonFiles) {
+            const dir = dirname(f);
+            if (!byLocation[dir]) byLocation[dir] = [];
+            byLocation[dir].push(f);
+          }
+
+          const selectedFiles = [];
+          for (const [loc, files] of Object.entries(byLocation)) {
+            const product = files.find(f => /Sales by Product(?! per Day| & Location)/i.test(basename(f)));
+            const productLoc = files.find(f => /Sales by Product & Location(?! per Day)/i.test(basename(f)));
+            const classification = files.find(f => /Sales by Classification/i.test(basename(f)));
+            const productPerDay = files.find(f => /Sales by Product per Day/i.test(basename(f)));
+
+            if (product) selectedFiles.push(product);
+            else if (productLoc) selectedFiles.push(productLoc);
+            else if (classification) selectedFiles.push(classification);
+            else if (productPerDay) selectedFiles.push(productPerDay);
+          }
+
+          if (selectedFiles.length > 0) jsonFiles = selectedFiles;
+        } else if (reportType !== 'auto') {
+          const patterns = {
+            product: /Sales by Product(?! per Day| & Location)/i,
+            invoice: /Sales by Invoice/i,
+            itemized: /Itemized Sales/i,
+            daily: /per Day/i,
+          };
+          if (patterns[reportType]) {
+            jsonFiles = jsonFiles.filter(f => patterns[reportType].test(basename(f)));
+          }
+        }
+
+        // Process files and aggregate
+        const aggregated = {};
+        let totalRecords = 0;
+        let totalSize = 0;
+
+        const processFile = async (filePath) => {
+          try {
+            const stats = statSync(filePath);
+            totalSize += stats.size;
+
+            const content = await readFile(filePath, 'utf8');
+            const data = JSON.parse(content);
+
+            if (!Array.isArray(data)) return { success: true, records: 0 };
+
+            for (const record of data) {
+              const key = String(record[groupBy] || '(unknown)').slice(0, 50);
+              if (!aggregated[key]) {
+                aggregated[key] = { _count: 0 };
+                sumFields.forEach(f => aggregated[key][f] = 0);
+              }
+              aggregated[key]._count++;
+              totalRecords++;
+
+              sumFields.forEach(f => {
+                const val = parseFloat(String(record[f] || 0).replace(/[^0-9.-]/g, ''));
+                if (!isNaN(val)) aggregated[key][f] += val;
+              });
+            }
+            return { success: true, records: data.length };
+          } catch (err) {
+            return { success: false, error: err.message };
+          }
+        };
+
+        // Process in parallel batches
+        for (let i = 0; i < jsonFiles.length; i += PARALLEL_FILE_BATCH) {
+          const batch = jsonFiles.slice(i, i + PARALLEL_FILE_BATCH);
+          await Promise.all(batch.map(processFile));
+        }
+
+        // Sort and return top N
+        const mainSumField = sumFields[0] || '_count';
+        const results = Object.entries(aggregated)
+          .map(([key, vals]) => ({ [groupBy]: key, ...vals }))
+          .sort((a, b) => (b[mainSumField] || 0) - (a[mainSumField] || 0))
+          .slice(0, topN);
+
+        // Calculate totals
+        const allResults = Object.entries(aggregated).map(([key, vals]) => ({ [groupBy]: key, ...vals }));
+        const totals = { _count: totalRecords };
+        sumFields.forEach(f => {
+          totals[f] = allResults.reduce((sum, r) => sum + (r[f] || 0), 0);
+        });
+
+        return {
+          success: true,
+          groupBy,
+          sumFields,
+          filesProcessed: jsonFiles.length,
+          filesUsed: jsonFiles.map(f => basename(f)),
+          totalRecords,
+          totalSizeFormatted: formatBytes(totalSize),
+          results,
+          totals,
+          chart: {
+            type: 'bar',
+            title: `Top ${topN} by ${mainSumField}`,
+            data: results.slice(0, 10).map(r => ({
+              label: r[groupBy],
+              value: r[mainSumField] || 0
+            }))
+          }
+        };
+      }
+
       default:
         return { success: false, error: `Unknown tool: ${name}` };
     }
@@ -512,6 +1155,7 @@ class Spinner {
     this.frame = 0;
     this.interval = null;
     this.start = Date.now();
+    this.streaming = false; // Track if we're in streaming mode
   }
 
   run() {
@@ -521,9 +1165,25 @@ class Spinner {
   }
 
   render() {
+    if (this.streaming) return; // Don't overwrite during streaming
     const s = SPINNER[this.frame % SPINNER.length];
-    process.stdout.write(`\r  ${GRAY_DIM}${s}${RESET} ${GRAY}${this.text}${RESET}`);
+    process.stdout.write(`\r\x1b[K  ${GRAY_DIM}${s}${RESET} ${GRAY}${this.text}${RESET}`);
     this.frame++;
+  }
+
+  // Clear current spinner line (for inserting content above)
+  clear() {
+    process.stdout.write(`\r\x1b[K`);
+  }
+
+  // Pause spinner animation (for streaming mode)
+  pause() {
+    this.streaming = true;
+  }
+
+  // Resume spinner animation
+  resume() {
+    this.streaming = false;
   }
 
   stop(text, ok = true) {
@@ -554,6 +1214,14 @@ async function sendMessage(message, toolResults = null, pendingContent = null) {
     platform: process.platform,
     client: 'cli',
     format_hint: 'terminal',
+    // Visualization instructions for chart-compatible responses
+    visualization_instructions: `When returning data, format it for visualization:
+- For rankings/comparisons: return { chart: { type: 'bar', title: 'Title', data: [{ label: 'Name', value: 123 }] } }
+- For trends over time: return { chart: { type: 'line', title: 'Title', data: [{ label: 'Date', value: 123 }] } }
+- For proportions: return { chart: { type: 'donut', title: 'Title', data: [{ label: 'Category', value: 45 }] } }
+- For KPIs: return { chart: { type: 'metrics', title: 'Title', data: [{ label: 'Revenue', value: '$127K', change: '+12.3%' }] } }
+- For tables: return { chart: { type: 'table', title: 'Title', headers: ['Col1', 'Col2'], rows: [['val1', 'val2']] } }
+Always include visualizations when showing sales, inventory, revenue, or analytics data.`,
   };
   if (ctx.userId) body.user_id = ctx.userId;
   if (ctx.userEmail) body.user_email = ctx.userEmail;
@@ -657,9 +1325,10 @@ async function streamResponse(response, userMessage, existingSpinner = null) {
         let content = event.content || event.text || '';
         if (content) {
           if (!textStarted) {
+            // Switch to "Generating" spinner
             if (spinner) {
               spinner.stop("Thinking", true);
-              spinner = null;
+              spinner = new Spinner("Generating").run();
             }
             textStarted = true;
             process.stdout.write("\n");
@@ -674,6 +1343,7 @@ async function streamResponse(response, userMessage, existingSpinner = null) {
 
           // Output complete lines with formatting
           for (const line of lines) {
+            if (spinner) spinner.clear();
             process.stdout.write(formatLine(line) + "\n");
           }
 
@@ -686,9 +1356,10 @@ async function streamResponse(response, userMessage, existingSpinner = null) {
         // Claude API format - text delta inside content block
         if (event.delta?.text) {
           if (!textStarted) {
+            // Switch to "Generating" spinner
             if (spinner) {
               spinner.stop("Thinking", true);
-              spinner = null;
+              spinner = new Spinner("Generating").run();
             }
             textStarted = true;
             process.stdout.write("\n");
@@ -699,6 +1370,7 @@ async function streamResponse(response, userMessage, existingSpinner = null) {
           lineBuffer = lines.pop() || "";
 
           for (const line of lines) {
+            if (spinner) spinner.clear();
             process.stdout.write(formatLine(line) + "\n");
           }
 
@@ -761,6 +1433,16 @@ async function streamResponse(response, userMessage, existingSpinner = null) {
           const toolResultName = event.tool_name.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
           spinner.stop(toolResultName, true);
           spinner = null;
+        }
+        // Try to render chart from tool result data
+        if (event.result) {
+          try {
+            const resultData = typeof event.result === 'string' ? JSON.parse(event.result) : event.result;
+            const chartOutput = tryRenderChart(resultData, event.tool_name);
+            if (chartOutput) {
+              process.stdout.write('\n' + chartOutput + '\n');
+            }
+          } catch {}
         }
         break;
 
@@ -1152,6 +1834,10 @@ async function interactive(hasPrevious) {
   let menuVisible = false;
   let isProcessing = false;
 
+  // Get terminal dimensions
+  const getWidth = () => process.stdout.columns || 80;
+  const getHeight = () => process.stdout.rows || 24;
+
   // Get the prompt prefix based on current context
   const getPrompt = () => {
     if (ctx.chatType === 'team') {
@@ -1160,69 +1846,34 @@ async function interactive(hasPrevious) {
     return `> `;
   };
 
-  // Show prompt
-  const showPrompt = () => {
-    process.stdout.write(getPrompt());
+  // Draw edge-to-edge divider line (Claude Code style)
+  const drawDivider = () => {
+    const width = getWidth();
+    return `${GRAY_DARK}${'─'.repeat(width)}${RESET}`;
   };
 
-  // Full render - clears below cursor and redraws everything
+  // Track if we've drawn the input box
+  let inputBoxDrawn = false;
+
+  // Show prompt with divider above and below (initial draw)
+  const showPrompt = () => {
+    process.stdout.write(drawDivider() + '\n');  // Top divider
+    process.stdout.write(getPrompt());            // Prompt line (cursor here)
+    process.stdout.write('\n' + drawDivider());   // Bottom divider
+    process.stdout.write('\x1b[A\x1b[' + (getPrompt().length + 1) + 'G'); // Move up, to end of prompt
+    inputBoxDrawn = true;
+  };
+
+  // Full render - updates input in place between dividers
   const render = () => {
     if (isProcessing) return;
-
-    // Move to start of line, clear from cursor to end of screen
+    // Move to start of line, clear line only
     process.stdout.write('\r\x1b[K');
-
-    // Draw input with context-aware prompt
-    process.stdout.write(`${getPrompt()}${inputBuffer}`);
-
-    // Draw command menu if visible
-    if (menuVisible && menuItems.length > 0) {
-      process.stdout.write('\x1b[J');
-
-      // Find max command width for alignment
-      const maxCmdLen = Math.max(...menuItems.map(i => i.cmd.length));
-
-      for (let i = 0; i < menuItems.length; i++) {
-        const item = menuItems[i];
-        const selected = i === menuIndex;
-        const padding = ' '.repeat(maxCmdLen - item.cmd.length + 4);
-        const pointer = selected ? `${BLUE}>${RESET} ` : '  ';
-        if (selected) {
-          process.stdout.write(`\n  ${pointer}\x1b[7m ${item.cmd} \x1b[27m${padding}${WHITE}${item.desc}${RESET}`);
-        } else {
-          process.stdout.write(`\n  ${pointer}${item.cmd}${padding}${GRAY_DIM}${item.desc}${RESET}`);
-        }
-      }
-
-      const menuLines = menuItems.length;
-      process.stdout.write(`\x1b[${menuLines}A\r`);
-      process.stdout.write(`${getPrompt()}${inputBuffer}`);
-    }
-
-    // Draw submenu if visible (generic for history, location, team, etc.)
-    if (submenu.visible && submenu.items.length > 0) {
-      process.stdout.write('\x1b[J');
-
-      // Find max label width for alignment
-      const maxLabelLen = Math.max(...submenu.items.map(i => i.label.length));
-
-      for (let i = 0; i < submenu.items.length; i++) {
-        const item = submenu.items[i];
-        const selected = i === submenu.index;
-        const padding = item.desc ? ' '.repeat(maxLabelLen - item.label.length + 4) : '';
-        const desc = item.desc || '';
-        const pointer = selected ? `${BLUE}>${RESET} ` : '  ';
-        if (selected) {
-          process.stdout.write(`\n  ${pointer}\x1b[7m ${item.label} \x1b[27m${padding}${WHITE}${desc}${RESET}`);
-        } else {
-          process.stdout.write(`\n  ${pointer}${item.label}${padding}${GRAY_DIM}${desc}${RESET}`);
-        }
-      }
-
-      const menuLines = submenu.items.length;
-      process.stdout.write(`\x1b[${menuLines}A\r`);
-      process.stdout.write(`${getPrompt()}${inputBuffer}`);
-    }
+    // Redraw prompt + input
+    process.stdout.write(getPrompt() + inputBuffer);
+    // Redraw bottom divider (move down, draw, move back up)
+    process.stdout.write('\n\x1b[K' + drawDivider());
+    process.stdout.write('\x1b[A\x1b[' + (getPrompt().length + inputBuffer.length + 1) + 'G');
   };
 
   // Update menu based on input
@@ -1639,8 +2290,9 @@ async function interactive(hasPrevious) {
         return;
       }
 
-      // Echo command for other commands
+      // Echo command for other commands with divider below
       process.stdout.write(`${getPrompt()}${selectedItem.cmd}\n`);
+      process.stdout.write(drawDivider() + '\n');
       isProcessing = true;
       await executeCommand(selectedItem);
       isProcessing = false;
@@ -1689,8 +2341,9 @@ async function interactive(hasPrevious) {
       return;
     }
 
-    // Echo the command for other inputs
+    // Echo the command for other inputs with divider below (Claude Code style)
     process.stdout.write(`${getPrompt()}${input}\n`);
+    process.stdout.write(drawDivider() + '\n');
 
     // Quick exit commands
     if (input === "/quit" || input === "/exit" || input === "/q") {
