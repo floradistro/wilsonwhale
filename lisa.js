@@ -569,6 +569,9 @@ let ctx = {
 
   // Backend-driven menu config (loaded on init)
   menuConfig: [],
+
+  // Dangerous mode - skip permission prompts
+  dangerouslySkipPermissions: false,
 };
 
 // =============================================================================
@@ -1083,9 +1086,14 @@ const DANGEROUS_PATTERNS = [
 ];
 
 async function checkDangerousOperation(command, toolName) {
+  // Skip all checks if dangerously-skip-permissions is enabled
+  if (ctx.dangerouslySkipPermissions) {
+    return true;
+  }
+
   for (const { pattern, desc } of DANGEROUS_PATTERNS) {
     if (pattern.test(command)) {
-      process.stdout.write(`\n  ${ORANGE}⚠${RESET} ${WHITE}Dangerous operation detected:${RESET} ${desc}\n`);
+      process.stdout.write(`\n  ${ORANGE}!${RESET} ${WHITE}Dangerous operation detected:${RESET} ${desc}\n`);
       process.stdout.write(`  ${GRAY}Command: ${command.substring(0, 60)}${command.length > 60 ? '...' : ''}${RESET}\n`);
 
       return new Promise((resolve) => {
@@ -1669,6 +1677,8 @@ async function sendMessage(message, toolResults = null, pendingContent = null) {
     format_hint: 'terminal',
     // Project context from LISA.md or CLAUDE.md
     project_context: projectContext,
+    // Style instructions
+    style_instructions: 'NEVER use emojis in responses. Use plain text only. Be concise and direct.',
     // Visualization instructions for chart-compatible responses
     visualization_instructions: `When returning data, format it for visualization:
 - For rankings/comparisons: return { chart: { type: 'bar', title: 'Title', data: [{ label: 'Name', value: 123 }] } }
@@ -3423,7 +3433,7 @@ async function whoamiCmd() {
 // =============================================================================
 
 function parseArgs(argv) {
-  const args = { message: [], help: false, version: false, newSession: false, location: null };
+  const args = { message: [], help: false, version: false, newSession: false, location: null, dangerouslySkipPermissions: false };
 
   for (let i = 2; i < argv.length; i++) {
     const arg = argv[i];
@@ -3431,6 +3441,7 @@ function parseArgs(argv) {
     else if (arg === "-v" || arg === "--version") args.version = true;
     else if (arg === "-n" || arg === "--new") args.newSession = true;
     else if (arg === "-l" || arg === "--location") args.location = argv[++i];
+    else if (arg === "--dangerously-skip-permissions") args.dangerouslySkipPermissions = true;
     else if (!arg.startsWith("-")) args.message.push(arg);
   }
 
@@ -3460,13 +3471,17 @@ ${BOLD}Commands:${RESET}
   lisa whoami              Show user info
 
 ${BOLD}Options:${RESET}
-  -h, --help               Show help
-  -v, --version            Show version
-  -n, --new                New conversation
-  -l, --location NAME      Filter by location
+  -h, --help                        Show help
+  -v, --version                     Show version
+  -n, --new                         New conversation
+  -l, --location NAME               Filter by location
+  --dangerously-skip-permissions    Auto-approve dangerous operations
 `);
     process.exit(0);
   }
+
+  // Set dangerous mode from args
+  ctx.dangerouslySkipPermissions = args.dangerouslySkipPermissions;
 
   if (args.version) {
     console.log(`Lisa v${VERSION}`);
