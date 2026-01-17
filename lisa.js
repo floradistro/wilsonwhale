@@ -10,7 +10,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSy
 import { readFile, stat, readdir } from "fs/promises";
 import { homedir } from "os";
 import { join, dirname, basename, extname } from "path";
-import { execSync, spawnSync } from "child_process";
+import { execSync, spawnSync, spawn } from "child_process";
 
 // =============================================================================
 // Configuration
@@ -20,7 +20,7 @@ const SUPABASE_URL = "https://uaednwpxursknmwdeejn.supabase.co";
 const ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVhZWRud3B4dXJza25td2RlZWpuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA5OTcyMzMsImV4cCI6MjA3NjU3MzIzM30.N8jPwlyCBB5KJB5I-XaK6m-mq88rSR445AWFJJmwRCg";
 const SERVICE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVhZWRud3B4dXJza25td2RlZWpuIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MDk5NzIzMywiZXhwIjoyMDc2NTczMjMzfQ.l0NvBbS2JQWPObtWeVD2M2LD866A2tgLmModARYNnbI";
 
-const VERSION = "2.0.0";
+const VERSION = "2.2.0";
 
 // GitHub repository for updates (uses Releases API)
 const GITHUB_REPO = "floradistro/pt";
@@ -859,18 +859,246 @@ async function analyzeDirectoryParallel(dirPath, options = {}) {
 }
 
 const LOCAL_TOOLS = [
-  { name: "Read", description: "Read file contents", parameters: { type: "object", properties: { file_path: { type: "string" }, offset: { type: "number" }, limit: { type: "number" } }, required: ["file_path"] } },
-  { name: "Edit", description: "Edit file by replacing text", parameters: { type: "object", properties: { file_path: { type: "string" }, old_string: { type: "string" }, new_string: { type: "string" }, replace_all: { type: "boolean" } }, required: ["file_path", "old_string", "new_string"] } },
-  { name: "Write", description: "Write file contents", parameters: { type: "object", properties: { file_path: { type: "string" }, content: { type: "string" } }, required: ["file_path", "content"] } },
-  { name: "Glob", description: "Find files by pattern", parameters: { type: "object", properties: { pattern: { type: "string" }, path: { type: "string" } }, required: ["pattern"] } },
-  { name: "Grep", description: "Search in files", parameters: { type: "object", properties: { pattern: { type: "string" }, path: { type: "string" }, case_insensitive: { type: "boolean" } }, required: ["pattern"] } },
-  { name: "Bash", description: "Run shell command", parameters: { type: "object", properties: { command: { type: "string" }, cwd: { type: "string" }, timeout: { type: "number" } }, required: ["command"] } },
-  { name: "LS", description: "List directory", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
-  { name: "Scan", description: "Analyze directory structure and contents in parallel", parameters: { type: "object", properties: { path: { type: "string" }, depth: { type: "number" }, content: { type: "boolean" } }, required: ["path"] } },
-  { name: "Peek", description: "Sample large JSON files without loading entirely", parameters: { type: "object", properties: { file_path: { type: "string" }, limit: { type: "number" }, aggregate: { type: "object" } }, required: ["file_path"] } },
-  { name: "Multi", description: "Read multiple files in parallel", parameters: { type: "object", properties: { paths: { type: "array", items: { type: "string" } }, lines: { type: "number" } }, required: ["paths"] } },
-  { name: "Sum", description: "Aggregate data from JSON files (handles COVA exports)", parameters: { type: "object", properties: { path: { type: "string" }, group: { type: "string" }, fields: { type: "array", items: { type: "string" } }, top: { type: "number" }, type: { type: "string" } }, required: ["path"] } },
+  {
+    name: "Read",
+    description: "Read a file from the filesystem. Returns content with line numbers. Can read text files, images, PDFs, and Jupyter notebooks.",
+    parameters: {
+      type: "object",
+      properties: {
+        file_path: { type: "string", description: "Absolute path to the file to read" },
+        offset: { type: "number", description: "Line number to start reading from (1-indexed)" },
+        limit: { type: "number", description: "Number of lines to read (default: 2000)" }
+      },
+      required: ["file_path"]
+    }
+  },
+  {
+    name: "Edit",
+    description: "Edit a file by replacing exact text. The old_string must be unique in the file unless using replace_all.",
+    parameters: {
+      type: "object",
+      properties: {
+        file_path: { type: "string", description: "Absolute path to the file to modify" },
+        old_string: { type: "string", description: "The exact text to find and replace" },
+        new_string: { type: "string", description: "The replacement text" },
+        replace_all: { type: "boolean", description: "If true, replace ALL occurrences (default: false)" }
+      },
+      required: ["file_path", "old_string", "new_string"]
+    }
+  },
+  {
+    name: "Write",
+    description: "Write content to a file. Creates parent directories if needed. Overwrites existing files.",
+    parameters: {
+      type: "object",
+      properties: {
+        file_path: { type: "string", description: "Absolute path to the file to write" },
+        content: { type: "string", description: "Content to write to the file" }
+      },
+      required: ["file_path", "content"]
+    }
+  },
+  {
+    name: "Glob",
+    description: "Find files matching a glob pattern. Supports ** for recursive matching. Returns files sorted by modification time.",
+    parameters: {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: "Glob pattern like '**/*.js' or 'src/**/*.ts'" },
+        path: { type: "string", description: "Base directory to search in (default: cwd)" },
+        type: { type: "string", description: "Filter: 'f' for files only, 'd' for directories only" },
+        limit: { type: "number", description: "Maximum results (default: 100)" }
+      },
+      required: ["pattern"]
+    }
+  },
+  {
+    name: "Grep",
+    description: "Search for regex patterns in files. Supports context lines and multiple output modes.",
+    parameters: {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: "Regex pattern to search for" },
+        path: { type: "string", description: "File or directory to search (default: cwd)" },
+        glob: { type: "string", description: "Filter files by glob, e.g. '*.js' or '*.{ts,tsx}'" },
+        include: { type: "string", description: "File type filter: js, ts, py, go, rust, etc." },
+        case_insensitive: { type: "boolean", description: "Case insensitive search" },
+        context_before: { type: "number", description: "Lines before match (-B)" },
+        context_after: { type: "number", description: "Lines after match (-A)" },
+        context: { type: "number", description: "Lines before AND after (-C)" },
+        output_mode: { type: "string", enum: ["content", "files", "count"], description: "'content'=lines, 'files'=paths only, 'count'=counts" },
+        limit: { type: "number", description: "Max results (default: 50)" },
+        multiline: { type: "boolean", description: "Multiline mode where . matches newlines" }
+      },
+      required: ["pattern"]
+    }
+  },
+  {
+    name: "Bash",
+    description: "Execute a shell command. Use for git, npm, docker, etc. Avoid for file ops (use Read/Write/Edit).",
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "The bash command to execute" },
+        cwd: { type: "string", description: "Working directory (default: cwd)" },
+        timeout: { type: "number", description: "Timeout in ms (default: 120000, max: 600000)" },
+        description: { type: "string", description: "Short description of what this command does" },
+        background: { type: "boolean", description: "Run in background, return immediately" }
+      },
+      required: ["command"]
+    }
+  },
+  {
+    name: "LS",
+    description: "List directory contents with file types and sizes.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Directory path to list" },
+        all: { type: "boolean", description: "Include hidden files" },
+        long: { type: "boolean", description: "Long format with sizes/dates" }
+      },
+      required: ["path"]
+    }
+  },
+  {
+    name: "Scan",
+    description: "Analyze directory structure recursively. Returns tree with file counts and sizes.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Directory to analyze" },
+        depth: { type: "number", description: "Max depth (default: 5)" },
+        content: { type: "boolean", description: "Include file previews" },
+        pattern: { type: "string", description: "Glob filter for files" }
+      },
+      required: ["path"]
+    }
+  },
+  {
+    name: "Peek",
+    description: "Sample large JSON/JSONL files. Returns schema, samples, and optional aggregations.",
+    parameters: {
+      type: "object",
+      properties: {
+        file_path: { type: "string", description: "Path to JSON or JSONL file" },
+        limit: { type: "number", description: "Records to sample (default: 100)" },
+        aggregate: {
+          type: "object",
+          properties: {
+            groupBy: { type: "string" },
+            sumFields: { type: "array", items: { type: "string" } }
+          }
+        }
+      },
+      required: ["file_path"]
+    }
+  },
+  {
+    name: "Multi",
+    description: "Read multiple files in parallel. More efficient than sequential Reads.",
+    parameters: {
+      type: "object",
+      properties: {
+        paths: { type: "array", items: { type: "string" }, description: "File paths to read" },
+        lines: { type: "number", description: "Max lines per file (default: 500)" }
+      },
+      required: ["paths"]
+    }
+  },
+  {
+    name: "Sum",
+    description: "Aggregate JSON files in a directory. Smart handling of COVA exports to avoid double-counting.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Directory or file path" },
+        group: { type: "string", description: "Group by field (default: 'Product')" },
+        fields: { type: "array", items: { type: "string" }, description: "Fields to sum" },
+        top: { type: "number", description: "Top N results (default: 20)" },
+        type: { type: "string", description: "'product', 'invoice', 'itemized', 'daily', or 'auto'" }
+      },
+      required: ["path"]
+    }
+  },
+  {
+    name: "TodoWrite",
+    description: "Create and manage a task list. Use for complex multi-step tasks. Shows progress to user.",
+    parameters: {
+      type: "object",
+      properties: {
+        todos: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              content: { type: "string", description: "Task description (imperative form)" },
+              status: { type: "string", enum: ["pending", "in_progress", "completed"], description: "Task status" }
+            },
+            required: ["content", "status"]
+          },
+          description: "Array of todo items"
+        }
+      },
+      required: ["todos"]
+    }
+  },
+  {
+    name: "AskUser",
+    description: "Ask the user a question when you need clarification or to make a decision.",
+    parameters: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "The question to ask" },
+        options: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional list of choices (user can also type a custom answer)"
+        }
+      },
+      required: ["question"]
+    }
+  }
 ];
+
+// =============================================================================
+// Permission System (for dangerous operations)
+// =============================================================================
+
+const DANGEROUS_PATTERNS = [
+  // Destructive file operations
+  { pattern: /\brm\s+(-rf?|--force|-r)\s/i, desc: 'recursive/forced delete' },
+  { pattern: /\brm\s+.*\*/i, desc: 'wildcard delete' },
+  { pattern: />\s*\/dev\/null/i, desc: 'discard to /dev/null' },
+  // Database operations
+  { pattern: /\bDROP\s+(TABLE|DATABASE|INDEX|VIEW)/i, desc: 'DROP statement' },
+  { pattern: /\bTRUNCATE\s+TABLE/i, desc: 'TRUNCATE statement' },
+  { pattern: /\bDELETE\s+FROM\s+\w+\s*(;|$)/i, desc: 'DELETE without WHERE' },
+  // Git operations
+  { pattern: /\bgit\s+push\s+.*--force/i, desc: 'force push' },
+  { pattern: /\bgit\s+reset\s+--hard/i, desc: 'hard reset' },
+  // System operations
+  { pattern: /\bsudo\s/i, desc: 'sudo command' },
+  { pattern: /\bchmod\s+777/i, desc: 'chmod 777' },
+];
+
+async function checkDangerousOperation(command, toolName) {
+  for (const { pattern, desc } of DANGEROUS_PATTERNS) {
+    if (pattern.test(command)) {
+      process.stdout.write(`\n  ${ORANGE}⚠${RESET} ${WHITE}Dangerous operation detected:${RESET} ${desc}\n`);
+      process.stdout.write(`  ${GRAY}Command: ${command.substring(0, 60)}${command.length > 60 ? '...' : ''}${RESET}\n`);
+
+      return new Promise((resolve) => {
+        const rl = createInterface({ input: process.stdin, output: process.stdout });
+        rl.question(`  ${ORANGE}Allow?${RESET} (y/N): `, (answer) => {
+          rl.close();
+          resolve(answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes');
+        });
+      });
+    }
+  }
+  return true; // Safe by default
+}
 
 // Execute a local tool - returns structured result for backend
 async function executeTool(name, params) {
@@ -902,28 +1130,140 @@ async function executeTool(name, params) {
       case "Glob": {
         if (!params.pattern) return { success: false, error: 'Missing pattern' };
         const basePath = (params.path || process.cwd()).replace(/[`$();&|<>]/g, '');
-        const filename = (params.pattern.split('/').pop() || '*').replace(/[`$();&|<>]/g, '');
-        const output = execSync(`find "${basePath}" -type f -name "${filename}" 2>/dev/null | head -100`, { encoding: 'utf8', timeout: 30000 });
-        return { success: true, files: output.trim().split('\n').filter(Boolean) };
+        const limit = params.limit || 100;
+        const typeFilter = params.type === 'd' ? '-type d' : params.type === 'f' ? '-type f' : '-type f';
+
+        // Convert glob pattern to find command
+        let findCmd;
+        if (params.pattern.includes('**')) {
+          // Recursive glob - use find with -name
+          const filename = params.pattern.replace(/\*\*\//g, '').replace(/[`$();&|<>]/g, '');
+          findCmd = `find "${basePath}" ${typeFilter} -name "${filename}" 2>/dev/null | head -${limit}`;
+        } else if (params.pattern.includes('/')) {
+          // Path-based pattern
+          const parts = params.pattern.split('/');
+          const filename = (parts.pop() || '*').replace(/[`$();&|<>]/g, '');
+          const subdir = parts.join('/').replace(/[`$();&|<>]/g, '');
+          const searchPath = subdir ? `${basePath}/${subdir}` : basePath;
+          findCmd = `find "${searchPath}" ${typeFilter} -name "${filename}" 2>/dev/null | head -${limit}`;
+        } else {
+          // Simple filename pattern
+          const filename = params.pattern.replace(/[`$();&|<>]/g, '');
+          findCmd = `find "${basePath}" ${typeFilter} -name "${filename}" 2>/dev/null | head -${limit}`;
+        }
+
+        const output = execSync(findCmd, { encoding: 'utf8', timeout: 30000 });
+        const files = output.trim().split('\n').filter(Boolean);
+        return { success: true, files, count: files.length };
       }
       case "Grep": {
         if (!params.pattern) return { success: false, error: 'Missing pattern' };
         const safePath = (params.path || '.').replace(/[`$();&|<>]/g, '');
-        const safePattern = params.pattern.replace(/[`$();&|<>]/g, '\\$&');
+        const limit = params.limit || 50;
+
+        // Build grep/rg command with all options
+        let cmd = 'grep';
+        let args = ['-rn']; // recursive, line numbers
+
+        // Check if ripgrep is available (faster)
         try {
-          const output = execSync(`grep ${params.case_insensitive ? '-rni' : '-rn'} -- "${safePattern}" "${safePath}" 2>/dev/null | head -50`, { encoding: 'utf8', timeout: 30000 });
+          execSync('which rg', { encoding: 'utf8' });
+          cmd = 'rg';
+          args = ['--line-number', '--no-heading'];
+          if (params.glob) args.push('--glob', params.glob);
+          if (params.include) args.push('--type', params.include);
+          if (params.multiline) args.push('--multiline', '--multiline-dotall');
+        } catch {
+          // Fall back to grep
+          if (params.glob) args.push(`--include=${params.glob}`);
+        }
+
+        if (params.case_insensitive) args.push('-i');
+
+        // Context lines
+        if (params.context) {
+          args.push('-C', String(params.context));
+        } else {
+          if (params.context_before) args.push('-B', String(params.context_before));
+          if (params.context_after) args.push('-A', String(params.context_after));
+        }
+
+        // Output mode
+        if (params.output_mode === 'files') {
+          args.push('-l'); // files only
+        } else if (params.output_mode === 'count') {
+          args.push('-c'); // count only
+        }
+
+        // Escape pattern for shell
+        const safePattern = params.pattern.replace(/'/g, "'\\''");
+
+        try {
+          const fullCmd = `${cmd} ${args.join(' ')} -- '${safePattern}' "${safePath}" 2>/dev/null | head -${limit}`;
+          const output = execSync(fullCmd, { encoding: 'utf8', timeout: 30000 });
+
+          if (params.output_mode === 'files') {
+            const files = output.trim().split('\n').filter(Boolean);
+            return { success: true, files, count: files.length };
+          } else if (params.output_mode === 'count') {
+            return { success: true, counts: output.trim() };
+          }
           return { success: true, matches: output };
-        } catch { return { success: true, matches: '' }; }
+        } catch { return { success: true, matches: '', files: [], count: 0 }; }
       }
       case "Bash": {
         if (!params.command) return { success: false, error: 'Missing command' };
-        const result = spawnSync('bash', ['-c', params.command], { cwd: params.cwd || process.cwd(), encoding: 'utf8', timeout: Math.min(params.timeout || 120000, 300000), maxBuffer: 10 * 1024 * 1024 });
-        return { success: result.status === 0, stdout: result.stdout || '', stderr: result.stderr || '', exit_code: result.status };
+        const cwd = params.cwd || process.cwd();
+        const timeout = Math.min(params.timeout || 120000, 600000);
+
+        // Check for dangerous operations
+        const allowed = await checkDangerousOperation(params.command, 'Bash');
+        if (!allowed) {
+          return { success: false, error: 'Operation cancelled by user', cancelled: true };
+        }
+
+        if (params.background) {
+          // Background execution - spawn and return immediately
+          const child = spawn('bash', ['-c', params.command], {
+            cwd,
+            detached: true,
+            stdio: 'ignore'
+          });
+          child.unref();
+          return { success: true, background: true, pid: child.pid, message: `Started in background with PID ${child.pid}` };
+        }
+
+        const result = spawnSync('bash', ['-c', params.command], {
+          cwd,
+          encoding: 'utf8',
+          timeout,
+          maxBuffer: 10 * 1024 * 1024
+        });
+        return {
+          success: result.status === 0,
+          stdout: result.stdout || '',
+          stderr: result.stderr || '',
+          exit_code: result.status,
+          description: params.description
+        };
       }
       case "LS": {
         if (!params.path) return { success: false, error: 'Missing path' };
         const entries = readdirSync(params.path, { withFileTypes: true });
-        return { success: true, entries: entries.map(e => ({ name: e.name, type: e.isDirectory() ? 'dir' : 'file' })) };
+        const results = entries
+          .filter(e => params.all || !e.name.startsWith('.'))
+          .map(e => {
+            const entry = { name: e.name, type: e.isDirectory() ? 'dir' : 'file' };
+            if (params.long) {
+              try {
+                const stats = statSync(join(params.path, e.name));
+                entry.size = stats.size;
+                entry.modified = stats.mtime.toISOString();
+              } catch {}
+            }
+            return entry;
+          });
+        return { success: true, entries: results, count: results.length };
       }
 
       case "Scan": {
@@ -1135,6 +1475,75 @@ async function executeTool(name, params) {
         };
       }
 
+      case "TodoWrite": {
+        if (!params.todos || !Array.isArray(params.todos)) {
+          return { success: false, error: 'Missing todos array' };
+        }
+
+        // Store the todo list
+        ctx.todos = params.todos;
+
+        // Render the todo list
+        process.stdout.write('\n');
+        for (const todo of params.todos) {
+          let icon, color;
+          switch (todo.status) {
+            case 'completed':
+              icon = '✓'; color = GREEN;
+              break;
+            case 'in_progress':
+              icon = '▸'; color = BLUE;
+              break;
+            default:
+              icon = '○'; color = GRAY;
+          }
+          process.stdout.write(`  ${color}${icon}${RESET} ${todo.status === 'completed' ? GRAY_DIM : WHITE}${todo.content}${RESET}\n`);
+        }
+        process.stdout.write('\n');
+
+        const completed = params.todos.filter(t => t.status === 'completed').length;
+        const total = params.todos.length;
+
+        return {
+          success: true,
+          message: `Updated todo list: ${completed}/${total} completed`,
+          todos: params.todos
+        };
+      }
+
+      case "AskUser": {
+        if (!params.question) {
+          return { success: false, error: 'Missing question' };
+        }
+
+        // Display question
+        process.stdout.write(`\n  ${BLUE}?${RESET} ${WHITE}${params.question}${RESET}\n`);
+
+        // Show options if provided
+        if (params.options && params.options.length > 0) {
+          params.options.forEach((opt, i) => {
+            process.stdout.write(`    ${GRAY}${i + 1}.${RESET} ${opt}\n`);
+          });
+          process.stdout.write(`    ${GRAY_DIM}(Enter number or type custom answer)${RESET}\n`);
+        }
+
+        // Get user input
+        return new Promise((resolve) => {
+          const rl = createInterface({ input: process.stdin, output: process.stdout });
+          rl.question(`  ${GRAY}>${RESET} `, (answer) => {
+            rl.close();
+
+            // Check if answer is a number selecting an option
+            const num = parseInt(answer);
+            if (params.options && num > 0 && num <= params.options.length) {
+              resolve({ success: true, answer: params.options[num - 1] });
+            } else {
+              resolve({ success: true, answer: answer || '(no answer)' });
+            }
+          });
+        });
+      }
+
       default:
         return { success: false, error: `Unknown tool: ${name}` };
     }
@@ -1199,10 +1608,54 @@ class Spinner {
 }
 
 // =============================================================================
+// PROJECT CONTEXT (LISA.md / CLAUDE.md)
+// =============================================================================
+
+function loadProjectContext() {
+  const cwd = process.cwd();
+  const candidates = [
+    join(cwd, 'LISA.md'),
+    join(cwd, 'CLAUDE.md'),
+    join(cwd, '.lisa', 'context.md'),
+    join(cwd, '.claude', 'context.md'),
+  ];
+
+  for (const file of candidates) {
+    try {
+      if (existsSync(file)) {
+        const content = readFileSync(file, 'utf8');
+        // Limit to 10K chars to avoid token bloat
+        return content.length > 10000 ? content.substring(0, 10000) + '\n...(truncated)' : content;
+      }
+    } catch {}
+  }
+  return null;
+}
+
+// Cache project context (reload on cwd change)
+let cachedProjectContext = null;
+let cachedCwd = null;
+
+function getProjectContext() {
+  const cwd = process.cwd();
+  if (cwd !== cachedCwd) {
+    cachedProjectContext = loadProjectContext();
+    cachedCwd = cwd;
+    if (cachedProjectContext) {
+      console.log(`  ${GRAY_DIM}📄 Loaded project context${RESET}`);
+    }
+  }
+  return cachedProjectContext;
+}
+
+// =============================================================================
 // API
 // =============================================================================
 
 async function sendMessage(message, toolResults = null, pendingContent = null) {
+  // Load project context from LISA.md or CLAUDE.md
+  const projectContext = getProjectContext();
+
   const body = {
     store_id: ctx.storeId,
     message,
@@ -1214,6 +1667,8 @@ async function sendMessage(message, toolResults = null, pendingContent = null) {
     platform: process.platform,
     client: 'cli',
     format_hint: 'terminal',
+    // Project context from LISA.md or CLAUDE.md
+    project_context: projectContext,
     // Visualization instructions for chart-compatible responses
     visualization_instructions: `When returning data, format it for visualization:
 - For rankings/comparisons: return { chart: { type: 'bar', title: 'Title', data: [{ label: 'Name', value: 123 }] } }
@@ -1379,6 +1834,27 @@ async function streamResponse(response, userMessage, existingSpinner = null) {
         break;
       }
 
+      case "thinking":
+        // Extended thinking from Claude - show in muted style
+        if (event.content) {
+          if (spinner) {
+            spinner.update("Thinking deeply...");
+          }
+          // Optionally show thinking content (currently hidden for cleaner UX)
+          // process.stdout.write(`\r\x1b[K  ${GRAY_DIM}💭 ${event.content.substring(0, 60)}...${RESET}`);
+        }
+        break;
+
+      case "usage":
+        // Token usage - store for display at end
+        if (event.input_tokens || event.output_tokens) {
+          ctx.lastUsage = {
+            input: event.input_tokens || 0,
+            output: event.output_tokens || 0
+          };
+        }
+        break;
+
       case "tool_start":
         if (textStarted) process.stdout.write("\n");
         if (spinner) {
@@ -1465,6 +1941,14 @@ async function streamResponse(response, userMessage, existingSpinner = null) {
           lineBuffer = "";
         }
         if (!textStarted) process.stdout.write("\n");
+
+        // Show token usage if available (subtle footer)
+        if (ctx.lastUsage && (ctx.lastUsage.input > 0 || ctx.lastUsage.output > 0)) {
+          const totalTokens = ctx.lastUsage.input + ctx.lastUsage.output;
+          // Estimate cost: ~$3/M input, ~$15/M output for Claude 3.5 Sonnet
+          const costEstimate = (ctx.lastUsage.input * 0.003 / 1000) + (ctx.lastUsage.output * 0.015 / 1000);
+          process.stdout.write(`\n${GRAY_DIM}  ⎯ ${totalTokens.toLocaleString()} tokens (~$${costEstimate.toFixed(4)})${RESET}\n`);
+        }
         break;
     }
   }
@@ -1864,21 +2348,82 @@ async function interactive(hasPrevious) {
     inputBoxDrawn = true;
   };
 
+  // Check if input looks like a file path (not a command)
+  const looksLikePath = (str) => {
+    if (!str || !str.startsWith('/')) return false;
+    // Common path prefixes
+    if (/^\/(?:Users|home|var|tmp|etc|opt|usr|bin|lib|mnt|dev|proc|sys|root|Applications|Library|Volumes|private)\b/i.test(str)) return true;
+    // Has a second slash within first 10 chars (like /foo/bar)
+    if (str.indexOf('/', 1) > 0 && str.indexOf('/', 1) < 10) return true;
+    // Contains file extension patterns
+    if (/\.\w{1,5}$/.test(str)) return true;
+    return false;
+  };
+
   // Full render - updates input in place between dividers
   const render = () => {
     if (isProcessing) return;
-    // Move to start of line, clear line only
-    process.stdout.write('\r\x1b[K');
+
+    // Calculate how many lines we need to clear (previous menu + divider)
+    const linesToClear = (menuVisible ? menuItems.length : 0) + (submenu.visible ? submenu.items.length + 2 : 0) + 1;
+
+    // Move to start of line
+    process.stdout.write('\r');
+    // Clear current line and lines below (menu area)
+    process.stdout.write('\x1b[J');
+
     // Redraw prompt + input
     process.stdout.write(getPrompt() + inputBuffer);
-    // Redraw bottom divider (move down, draw, move back up)
-    process.stdout.write('\n\x1b[K' + drawDivider());
-    process.stdout.write('\x1b[A\x1b[' + (getPrompt().length + inputBuffer.length + 1) + 'G');
+
+    // Draw command menu if visible
+    if (menuVisible && menuItems.length > 0) {
+      process.stdout.write('\n');
+      menuItems.forEach((item, i) => {
+        const selected = i === menuIndex;
+        const prefix = selected ? `${BLUE}▸${RESET} ` : '  ';
+        const cmdStyle = selected ? `${WHITE}${BOLD}` : `${GRAY}`;
+        const descStyle = selected ? `${GRAY}` : `${GRAY_DIM}`;
+        process.stdout.write(`${prefix}${cmdStyle}${item.cmd}${RESET}  ${descStyle}${item.desc}${RESET}\n`);
+      });
+      // Position cursor back to input line
+      process.stdout.write(`\x1b[${menuItems.length + 1}A`);
+      process.stdout.write('\r\x1b[' + (getPrompt().length + inputBuffer.length + 1) + 'G');
+    } else if (submenu.visible && submenu.items.length > 0) {
+      // Draw submenu
+      process.stdout.write('\n');
+      process.stdout.write(`  ${WHITE}${BOLD}${submenu.title}${RESET}\n`);
+      submenu.items.forEach((item, i) => {
+        const selected = i === submenu.index;
+        const prefix = selected ? `${BLUE}▸${RESET} ` : '  ';
+        const labelStyle = selected ? `${WHITE}` : `${GRAY}`;
+        const hintStyle = `${GRAY_DIM}`;
+        const hint = item.hint ? `  ${hintStyle}${item.hint}${RESET}` : '';
+        process.stdout.write(`${prefix}${labelStyle}${item.label}${RESET}${hint}\n`);
+      });
+      if (submenu.hint) {
+        process.stdout.write(`  ${GRAY_DIM}${submenu.hint}${RESET}\n`);
+      }
+      // Position cursor back to input line
+      const submenuLines = submenu.items.length + 2 + (submenu.hint ? 1 : 0);
+      process.stdout.write(`\x1b[${submenuLines}A`);
+      process.stdout.write('\r\x1b[' + (getPrompt().length + inputBuffer.length + 1) + 'G');
+    } else {
+      // No menu - just draw bottom divider
+      process.stdout.write('\n\x1b[K' + drawDivider());
+      process.stdout.write('\x1b[A\x1b[' + (getPrompt().length + inputBuffer.length + 1) + 'G');
+    }
   };
 
   // Update menu based on input
   const updateMenu = () => {
     const commands = getCommands();
+
+    // Don't show menu for file paths
+    if (looksLikePath(inputBuffer)) {
+      menuItems = [];
+      menuVisible = false;
+      return;
+    }
 
     if (inputBuffer === "/") {
       menuItems = commands.slice(0, 9);
@@ -2379,8 +2924,8 @@ async function interactive(hasPrevious) {
       return;
     }
 
-    // Check for exact command match
-    if (input.startsWith("/")) {
+    // Check for exact command match (but not file paths)
+    if (input.startsWith("/") && !looksLikePath(input)) {
       const commands = getCommands();
       const exactMatch = commands.find(c => c.cmd === input);
       if (exactMatch) {
@@ -2399,7 +2944,8 @@ async function interactive(hasPrevious) {
     }
 
     // Check if we're in team chat mode - handle non-command messages
-    if (ctx.chatType === 'team' && !input.startsWith('/')) {
+    // (file paths starting with / should still go through as messages)
+    if (ctx.chatType === 'team' && (!input.startsWith('/') || looksLikePath(input))) {
       // Handle @lisa to invoke AI in team chat
       if (input.toLowerCase().startsWith('@lisa ')) {
         const lisaPrompt = input.slice(6).trim();
