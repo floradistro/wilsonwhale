@@ -1,0 +1,20 @@
+{
+  "name": "lisa-cli",
+  "version": "2.0.0",
+  "description": "Lisa CLI - Conversational AI for your business with local file tools",
+  "main": "lisa.js",
+  "type": "module",
+  "bin": {
+    "lisa": "./lisa.js"
+  },
+  "scripts": {
+    "start": "node lisa.js",
+    "install-global": "node install.js"
+  },
+  "keywords": ["cli", "ai", "assistant", "business", "analytics"],
+  "author": "Flora",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
