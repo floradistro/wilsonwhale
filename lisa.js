@@ -2218,6 +2218,7 @@ async function interactive(hasPrevious) {
         return true;
 
       case "/new":
+      case "/new_chat":
         if (ctx.auth) {
           ctx.conversationId = await getOrCreateConversation(ctx.auth.accessToken, ctx.storeId, ctx.locationId);
         }
@@ -2323,6 +2324,7 @@ async function interactive(hasPrevious) {
   let menuVisible = false;
   let isProcessing = false;
   let prevInputRows = 1; // Track previous row count for proper clearing
+  let prevTotalLines = 2; // Track total lines in prompt box (top divider + input + menu/bottom divider)
 
   // Get terminal dimensions
   const getWidth = () => process.stdout.columns || 80;
@@ -2352,14 +2354,10 @@ async function interactive(hasPrevious) {
   // Track if we've drawn the input box
   let inputBoxDrawn = false;
 
-  // Show prompt with divider above and below (initial draw)
+  // Show prompt (simple - just prompt on its own line)
   const showPrompt = () => {
-    process.stdout.write(drawDivider() + '\n');  // Top divider
-    process.stdout.write(getPrompt());            // Prompt line (cursor here)
-    process.stdout.write('\n' + drawDivider());   // Bottom divider
-    process.stdout.write('\x1b[A\x1b[999C');      // Move up 1 line, go to end
-    inputBoxDrawn = true;
-    prevInputRows = 1;
+    process.stdout.write(drawDivider() + '\n');  // Divider above
+    process.stdout.write(getPrompt());            // Prompt (cursor at end)
   };
 
   // Check if input looks like a file path (not a command)
@@ -2376,47 +2374,31 @@ async function interactive(hasPrevious) {
     return false;
   };
 
-  // Full render - updates input in place between dividers
+  // Full render - simple single-line approach
   const render = () => {
     if (isProcessing) return;
 
-    const width = getWidth();
-    const inputRows = getInputRows();
-
-    // Move up to first row of input if it was multi-line
-    if (prevInputRows > 1) {
-      process.stdout.write(`\x1b[${prevInputRows - 1}A`);
-    }
-
-    // Move to start of line and clear everything from here down
-    process.stdout.write('\r\x1b[J');
-
-    // Redraw prompt + input (will wrap naturally)
+    // Simple approach: clear current line and redraw
+    process.stdout.write('\r\x1b[K');  // Go to start of line, clear line
     process.stdout.write(getPrompt() + inputBuffer);
 
-    // Update previous row count
-    prevInputRows = inputRows;
-
-    // Track how many lines we'll draw below so we can move back up
-    let linesBelow = 0;
-
-    // Draw command menu if visible
+    // Draw menu below if visible (will be cleared on next render)
     if (menuVisible && menuItems.length > 0) {
-      process.stdout.write('\n');
-      linesBelow = 1;
+      // Save cursor, draw menu, restore cursor
+      process.stdout.write('\x1b[s');  // Save cursor position
+      process.stdout.write('\n\x1b[J'); // Newline and clear below
       menuItems.forEach((item, i) => {
         const selected = i === menuIndex;
         const prefix = selected ? `${BLUE}▸${RESET} ` : '  ';
         const cmdStyle = selected ? `${WHITE}${BOLD}` : `${GRAY}`;
         const descStyle = selected ? `${GRAY}` : `${GRAY_DIM}`;
         process.stdout.write(`${prefix}${cmdStyle}${item.cmd}${RESET}  ${descStyle}${item.desc}${RESET}\n`);
-        linesBelow++;
       });
+      process.stdout.write('\x1b[u');  // Restore cursor position
     } else if (submenu.visible && submenu.items.length > 0) {
-      // Draw submenu
-      process.stdout.write('\n');
+      process.stdout.write('\x1b[s');
+      process.stdout.write('\n\x1b[J');
       process.stdout.write(`  ${WHITE}${BOLD}${submenu.title}${RESET}\n`);
-      linesBelow = 2;
       submenu.items.forEach((item, i) => {
         const selected = i === submenu.index;
         const prefix = selected ? `${BLUE}▸${RESET} ` : '  ';
@@ -2424,25 +2406,15 @@ async function interactive(hasPrevious) {
         const hintStyle = `${GRAY_DIM}`;
         const hint = item.hint ? `  ${hintStyle}${item.hint}${RESET}` : '';
         process.stdout.write(`${prefix}${labelStyle}${item.label}${RESET}${hint}\n`);
-        linesBelow++;
       });
       if (submenu.hint) {
         process.stdout.write(`  ${GRAY_DIM}${submenu.hint}${RESET}\n`);
-        linesBelow++;
       }
+      process.stdout.write('\x1b[u');
     } else {
-      // No menu - just draw bottom divider
-      process.stdout.write('\n' + drawDivider());
-      linesBelow = 1;
+      // Clear any leftover menu content below
+      process.stdout.write('\x1b[s\n\x1b[J\x1b[u');
     }
-
-    // Move cursor back up to input line, accounting for wrapped input
-    const totalUp = linesBelow + (inputRows - 1);
-    if (totalUp > 0) {
-      process.stdout.write(`\x1b[${totalUp}A`);
-    }
-    // Move to end of line (after input)
-    process.stdout.write('\x1b[999C');
   };
 
   // Update menu based on input
@@ -2805,11 +2777,7 @@ async function interactive(hasPrevious) {
     const selectedSubmenuItem = hadSubmenu && submenu.items.length > 0 ? submenu.items[submenu.index] : null;
     const submenuCallback = submenu.onSelect;
 
-    // Clear the entire prompt box (top divider + input + menu/bottom divider)
-    const oldInputRows = prevInputRows;
-    // Move up: 1 for top divider + (oldInputRows - 1) for multi-line input
-    const linesToMoveUp = 1 + (oldInputRows > 1 ? oldInputRows - 1 : 0);
-    process.stdout.write(`\x1b[${linesToMoveUp}A`);
+    // Clear current line and anything below
     process.stdout.write('\r\x1b[J');
 
     // Clear state
