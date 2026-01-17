@@ -1072,7 +1072,6 @@ const DANGEROUS_PATTERNS = [
   // Destructive file operations
   { pattern: /\brm\s+(-rf?|--force|-r)\s/i, desc: 'recursive/forced delete' },
   { pattern: /\brm\s+.*\*/i, desc: 'wildcard delete' },
-  { pattern: />\s*\/dev\/null/i, desc: 'discard to /dev/null' },
   // Database operations
   { pattern: /\bDROP\s+(TABLE|DATABASE|INDEX|VIEW)/i, desc: 'DROP statement' },
   { pattern: /\bTRUNCATE\s+TABLE/i, desc: 'TRUNCATE statement' },
@@ -1096,10 +1095,19 @@ async function checkDangerousOperation(command, toolName) {
       process.stdout.write(`\n  ${ORANGE}!${RESET} ${WHITE}Dangerous operation detected:${RESET} ${desc}\n`);
       process.stdout.write(`  ${GRAY}Command: ${command.substring(0, 60)}${command.length > 60 ? '...' : ''}${RESET}\n`);
 
+      // Exit raw mode for prompt
+      if (process.stdin.isTTY && process.stdin.isRaw) {
+        process.stdin.setRawMode(false);
+      }
+
       return new Promise((resolve) => {
         const rl = createInterface({ input: process.stdin, output: process.stdout });
         rl.question(`  ${ORANGE}Allow?${RESET} (y/N): `, (answer) => {
           rl.close();
+          // Re-enable raw mode
+          if (process.stdin.isTTY) {
+            process.stdin.setRawMode(true);
+          }
           resolve(answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes');
         });
       });
