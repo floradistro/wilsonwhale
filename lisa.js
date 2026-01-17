@@ -2805,9 +2805,11 @@ async function interactive(hasPrevious) {
     const selectedSubmenuItem = hadSubmenu && submenu.items.length > 0 ? submenu.items[submenu.index] : null;
     const submenuCallback = submenu.onSelect;
 
-    // Clear the menu from display (account for wrapped input)
+    // Clear the entire prompt box (top divider + input + menu/bottom divider)
     const oldInputRows = prevInputRows;
-    if (oldInputRows > 1) process.stdout.write(`\x1b[${oldInputRows - 1}A`);
+    // Move up: 1 for top divider + (oldInputRows - 1) for multi-line input
+    const linesToMoveUp = 1 + (oldInputRows > 1 ? oldInputRows - 1 : 0);
+    process.stdout.write(`\x1b[${linesToMoveUp}A`);
     process.stdout.write('\r\x1b[J');
 
     // Clear state
