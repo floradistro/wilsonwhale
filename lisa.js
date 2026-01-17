@@ -2369,8 +2369,9 @@ async function interactive(hasPrevious) {
   const showPrompt = () => {
     process.stdout.write(drawDivider() + '\n');  // Top divider
     process.stdout.write(getPrompt());            // Prompt line (cursor here)
+    process.stdout.write('\x1b7');                // Save cursor position HERE
     process.stdout.write('\n' + drawDivider());   // Bottom divider
-    process.stdout.write('\x1b[A\x1b[' + (getPrompt().length + 1) + 'G'); // Move up, to end of prompt
+    process.stdout.write('\x1b8');                // Restore to end of prompt
     inputBoxDrawn = true;
     prevInputRows = 1;
   };
