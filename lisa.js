@@ -2818,15 +2818,9 @@ async function interactive(hasPrevious) {
     const selectedSubmenuItem = hadSubmenu && submenu.items.length > 0 ? submenu.items[submenu.index] : null;
     const submenuCallback = submenu.onSelect;
 
-    // Clear menu lines first (if any were rendered)
-    if (lastMenuLines > 0) {
-      process.stdout.moveCursor(0, -lastMenuLines);
-      process.stdout.clearScreenDown();
-      process.stdout.moveCursor(0, -1);
-    }
-    // Clear current input line
+    // Clear just the input line (menu will be overwritten or scrolled away)
     process.stdout.cursorTo(0);
-    process.stdout.clearScreenDown();
+    process.stdout.clearLine(0);
 
     // Clear state
     inputBuffer = "";
