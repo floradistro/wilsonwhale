@@ -2387,9 +2387,6 @@ async function interactive(hasPrevious) {
     return false;
   };
 
-  // Track how many extra lines we drew (menu, divider, etc)
-  let prevExtraLines = 1; // At least the divider
-
   // Full render - updates input in place between dividers
   const render = () => {
     if (isProcessing) return;
@@ -2397,15 +2394,14 @@ async function interactive(hasPrevious) {
     const width = getWidth();
     const inputRows = getInputRows();
 
-    // Calculate total lines to clear (previous input rows + extra lines like menu)
-    const totalPrevLines = prevInputRows + prevExtraLines;
-
-    // Move cursor up to first row of our content
-    if (totalPrevLines > 1) {
-      process.stdout.write(`\x1b[${totalPrevLines - 1}A`);
+    // After cursor restore, we're at end of input line.
+    // Move up to first row of input if it was multi-line
+    if (prevInputRows > 1) {
+      process.stdout.write(`\x1b[${prevInputRows - 1}A`);
     }
 
-    // Move to start of line and clear from here down
+    // Move to start of line and clear everything from here down
+    // This clears the old input AND any menu/divider below
     process.stdout.write('\r\x1b[J');
 
     // Redraw prompt + input (will wrap naturally)
@@ -2427,7 +2423,6 @@ async function interactive(hasPrevious) {
         const descStyle = selected ? `${GRAY}` : `${GRAY_DIM}`;
         process.stdout.write(`${prefix}${cmdStyle}${item.cmd}${RESET}  ${descStyle}${item.desc}${RESET}\n`);
       });
-      prevExtraLines = menuItems.length + 1; // menu items + newline
     } else if (submenu.visible && submenu.items.length > 0) {
       // Draw submenu
       process.stdout.write('\n');
@@ -2443,11 +2438,9 @@ async function interactive(hasPrevious) {
       if (submenu.hint) {
         process.stdout.write(`  ${GRAY_DIM}${submenu.hint}${RESET}\n`);
       }
-      prevExtraLines = submenu.items.length + 2 + (submenu.hint ? 1 : 0);
     } else {
       // No menu - just draw bottom divider
       process.stdout.write('\n' + drawDivider());
-      prevExtraLines = 1; // just the divider
     }
 
     // Restore cursor position
