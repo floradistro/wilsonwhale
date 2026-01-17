@@ -3025,8 +3025,8 @@ async function interactive(hasPrevious) {
       return;
     }
 
-    // Regular message to Lisa (AI mode) - not a command
-    if (!input.startsWith('/')) {
+    // Regular message to Lisa (AI mode) - not a command (but allow file paths)
+    if (!input.startsWith('/') || looksLikePath(input)) {
       isProcessing = true;
       const spinner = new Spinner("Thinking").run();
       try {
