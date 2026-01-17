@@ -1675,7 +1675,7 @@ async function sendMessage(message, toolResults = null, pendingContent = null) {
   const body = {
     store_id: ctx.storeId,
     message,
-    conversation_history: ctx.history.map(m => ({ role: m.role, content: m.content })),
+    history: ctx.history.map(m => ({ role: m.role, content: m.content })),
     // Local tools for client-side execution
     local_tools: LOCAL_TOOLS,
     // New fields for backend-driven CLI
