@@ -2046,21 +2046,8 @@ async function initSession(opts = {}) {
       }
     }
 
-    if (!opts.newSession) {
-      const session = loadSession();
-      if (session?.conversationId && session?.storeId === auth.storeId) {
-        ctx.conversationId = session.conversationId;
-        // Restore location from session if set
-        if (session.locationId) {
-          ctx.locationId = session.locationId;
-          ctx.locationName = session.locationName || auth.locations?.find(l => l.id === session.locationId)?.name;
-        }
-        ctx.history = await loadHistory(auth.accessToken, session.conversationId);
-        // Load backend-driven menu config
-        ctx.menuConfig = await loadMenuConfig(auth.storeId);
-        return true;
-      }
-    }
+    // Always start fresh - no auto-resume
+    // User can resume previous chats via /history command
 
     ctx.conversationId = await getOrCreateConversation(auth.accessToken, auth.storeId, ctx.locationId);
     // Always load history from database (might have messages from previous sessions)
@@ -2378,10 +2365,12 @@ async function interactive(hasPrevious) {
   // Check if input looks like a file path (not a command)
   const looksLikePath = (str) => {
     if (!str || !str.startsWith('/')) return false;
-    // Common path prefixes
-    if (/^\/(?:Users|home|var|tmp|etc|opt|usr|bin|lib|mnt|dev|proc|sys|root|Applications|Library|Volumes|private)\b/i.test(str)) return true;
-    // Has a second slash within first 10 chars (like /foo/bar)
-    if (str.indexOf('/', 1) > 0 && str.indexOf('/', 1) < 10) return true;
+    // Common path prefixes (match full or partial, e.g. /U matches /Users)
+    const pathPrefixes = ['Users', 'home', 'var', 'tmp', 'etc', 'opt', 'usr', 'bin', 'lib', 'mnt', 'dev', 'proc', 'sys', 'root', 'Applications', 'Library', 'Volumes', 'private'];
+    const afterSlash = str.slice(1).split('/')[0].toLowerCase();
+    if (pathPrefixes.some(p => p.toLowerCase().startsWith(afterSlash) && afterSlash.length > 0)) return true;
+    // Has a second slash within first 15 chars (like /foo/bar)
+    if (str.indexOf('/', 1) > 0 && str.indexOf('/', 1) < 15) return true;
     // Contains file extension patterns
     if (/\.\w{1,5}$/.test(str)) return true;
     return false;
