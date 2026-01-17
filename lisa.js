@@ -1672,14 +1672,39 @@ async function sendMessage(message, toolResults = null, pendingContent = null) {
   // Load project context from LISA.md or CLAUDE.md
   const projectContext = getProjectContext();
 
+  // Extract path from message if it starts with a file path
+  let workingDir = process.cwd();
+  let effectiveMessage = message;
+
+  // Check if message starts with a path like /Users/... /home/... etc
+  const pathMatch = message.match(/^(\/(?:Users|home|var|tmp|opt|mnt|Volumes|Applications)[^\s]*)/i);
+  if (pathMatch) {
+    const extractedPath = pathMatch[1];
+    // Check if it's a directory or file
+    try {
+      const stats = await stat(extractedPath);
+      if (stats.isDirectory()) {
+        workingDir = extractedPath;
+      } else {
+        // It's a file, use its parent directory
+        workingDir = dirname(extractedPath);
+      }
+      // Update message to include clear context about the path
+      const taskPart = message.slice(extractedPath.length).trim();
+      effectiveMessage = `Working in: ${extractedPath}\n\nTask: ${taskPart || 'Explore this directory and help me with it'}`;
+    } catch (e) {
+      // Path doesn't exist, keep original message
+    }
+  }
+
   const body = {
     store_id: ctx.storeId,
-    message,
+    message: effectiveMessage,
     history: ctx.history.map(m => ({ role: m.role, content: m.content })),
     // Local tools for client-side execution
     local_tools: LOCAL_TOOLS,
     // New fields for backend-driven CLI
-    working_directory: process.cwd(),
+    working_directory: workingDir,
     platform: process.platform,
     client: 'cli',
     format_hint: 'terminal',
