@@ -1685,8 +1685,8 @@ async function sendMessage(message, toolResults = null, pendingContent = null) {
     format_hint: 'terminal',
     // Project context from LISA.md or CLAUDE.md
     project_context: projectContext,
-    // Style instructions
-    style_instructions: 'NEVER use emojis in responses. Use plain text only. Be concise and direct.',
+    // Style instructions - CRITICAL
+    style_instructions: 'CRITICAL: NEVER use emojis or emoticons in ANY response. Use plain ASCII text only. No unicode symbols. Be concise and direct. When given a task with a file path, execute it immediately without asking clarifying questions.',
     // Visualization instructions for chart-compatible responses
     visualization_instructions: `When returning data, format it for visualization:
 - For rankings/comparisons: return { chart: { type: 'bar', title: 'Title', data: [{ label: 'Name', value: 123 }] } }
@@ -2387,22 +2387,22 @@ async function interactive(hasPrevious) {
     return false;
   };
 
+  // Track how many extra lines we drew (menu, divider, etc)
+  let prevExtraLines = 1; // At least the divider
+
   // Full render - updates input in place between dividers
   const render = () => {
     if (isProcessing) return;
 
     const width = getWidth();
     const inputRows = getInputRows();
-    const promptLen = getPrompt().length;
-    const totalLen = promptLen + inputBuffer.length;
 
-    // Calculate cursor position for end of input
-    const cursorRow = Math.floor(totalLen / width);
-    const cursorCol = (totalLen % width) + 1;
+    // Calculate total lines to clear (previous input rows + extra lines like menu)
+    const totalPrevLines = prevInputRows + prevExtraLines;
 
-    // Move cursor up to first row of input (if we had multiple rows before)
-    if (prevInputRows > 1) {
-      process.stdout.write(`\x1b[${prevInputRows - 1}A`);
+    // Move cursor up to first row of our content
+    if (totalPrevLines > 1) {
+      process.stdout.write(`\x1b[${totalPrevLines - 1}A`);
     }
 
     // Move to start of line and clear from here down
@@ -2427,6 +2427,7 @@ async function interactive(hasPrevious) {
         const descStyle = selected ? `${GRAY}` : `${GRAY_DIM}`;
         process.stdout.write(`${prefix}${cmdStyle}${item.cmd}${RESET}  ${descStyle}${item.desc}${RESET}\n`);
       });
+      prevExtraLines = menuItems.length + 1; // menu items + newline
     } else if (submenu.visible && submenu.items.length > 0) {
       // Draw submenu
       process.stdout.write('\n');
@@ -2442,9 +2443,11 @@ async function interactive(hasPrevious) {
       if (submenu.hint) {
         process.stdout.write(`  ${GRAY_DIM}${submenu.hint}${RESET}\n`);
       }
+      prevExtraLines = submenu.items.length + 2 + (submenu.hint ? 1 : 0);
     } else {
       // No menu - just draw bottom divider
       process.stdout.write('\n' + drawDivider());
+      prevExtraLines = 1; // just the divider
     }
 
     // Restore cursor position
